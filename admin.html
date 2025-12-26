@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>流逝：數據監控中心</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Noto+Serif+TC:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #1a1a1a;
+            --panel-bg: #252525;
+            --text-main: #e0e0e0;
+            --text-muted: #888;
+            --accent: #8da399;
+            --valid: #66bb6a;
+            --invalid: #ef5350;
+            --border: #333;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'JetBrains Mono', monospace; /* 工程師風格字體 */
+            margin: 0; padding: 20px;
+            display: flex; justify-content: center;
+        }
+
+        .container {
+            width: 100%; max-width: 900px;
+            background: var(--panel-bg);
+            padding: 30px; border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+
+        /* Header Area */
+        header {
+            display: flex; justify-content: space-between; align-items: flex-end;
+            border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 20px;
+        }
+        h1 { margin: 0; font-size: 24px; color: var(--accent); font-family: 'Noto Serif TC', serif; letter-spacing: 2px; }
+        .stats { font-size: 13px; color: var(--text-muted); text-align: right; }
+        .stats span { color: #fff; font-weight: bold; margin-left: 5px; }
+
+        /* Toolbar */
+        .toolbar { display: flex; gap: 10px; margin-bottom: 20px; }
+        button {
+            padding: 8px 16px; border: 1px solid var(--border); background: #333;
+            color: #fff; cursor: pointer; border-radius: 4px; font-family: inherit;
+            transition: 0.2s; font-size: 13px;
+        }
+        button:hover { background: #444; border-color: #666; }
+        button.primary { background: var(--accent); border-color: var(--accent); color: #1a1a1a; font-weight: bold; }
+        button.primary:hover { opacity: 0.9; }
+
+        /* Data Table */
+        .table-container { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th { text-align: left; padding: 12px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-weight: normal; }
+        td { padding: 12px; border-bottom: 1px solid var(--border); }
+        
+        tr:hover { background: rgba(255,255,255,0.02); }
+
+        /* Status Indicators */
+        .status-dot { height: 8px; width: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+        .valid { background-color: var(--valid); box-shadow: 0 0 5px var(--valid); }
+        .invalid { background-color: var(--invalid); box-shadow: 0 0 5px var(--invalid); }
+        .row-invalid { color: var(--invalid); opacity: 0.7; text-decoration: line-through; }
+
+        /* Footer */
+        .footer { margin-top: 20px; font-size: 12px; color: #555; text-align: center; }
+
+        /* Loading */
+        #loading { text-align: center; padding: 40px; color: var(--text-muted); animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <div>
+            <h1>流逝：資料庫視圖</h1>
+            <small style="color:#666">PANTRY CLOUD / RAW DATA VIEWER</small>
+        </div>
+        <div class="stats">
+            <div>全球遊玩總次數 <span id="globalCount">--</span></div>
+            <div>總紀錄筆數 <span id="recordCount">--</span></div>
+        </div>
+    </header>
+
+    <div class="toolbar">
+        <button onclick="loadData()" class="primary">↻ 重新整理</button>
+        <button onclick="exportCSV()">⬇ 匯出 CSV (Excel)</button>
+    </div>
+
+    <div class="table-container">
+        <table id="dataTable">
+            <thead>
+                <tr>
+                    <th width="80">排名</th>
+                    <th width="100">狀態</th>
+                    <th>玩家名稱</th>
+                    <th>存活時間 (秒)</th>
+                    <th>紀錄時間</th>
+                    <th width="150" style="font-family: monospace; font-size: 12px; color: #555;">Hash Check</th>
+                </tr>
+            </thead>
+            <tbody id="tableBody">
+                </tbody>
+        </table>
+        <div id="loading">正在連線至遠端主機...</div>
+    </div>
+
+    <div class="footer">
+        System Status: Online | Protocol: CORS Proxy | Security: HMAC-SHA (Simulated)
+    </div>
+</div>
+
+<script>
+    // === 核心設定 (必須與遊戲本體完全一致) ===
+    const PANTRY_ID = "3b037575-e357-4684-9646-47f5b3ff2ee7"; 
+    const BASKET_NAME = "Rank_v1"; 
+    const PROXY_BASE = "https://corsproxy.io/?";
+    const TARGET_URL = `https://getpantry.cloud/apiv1/pantry/${PANTRY_ID}/basket/${BASKET_NAME}`;
+    
+    // 這把鑰匙是用來驗證數據真偽的，不能錯
+    const SECRET_SALT = "TheFlow_Survival_2025_HellMode_Secured";
+
+    // 全域變數儲存資料，供匯出使用
+    let currentData = [];
+
+    // === 驗證演算法 (與遊戲一致) ===
+    function generateSignature(name, score) {
+        // 確保 score 是格式化過的字串 (小數點後兩位)，因為遊戲端是這樣簽名的
+        const scoreStr = parseFloat(score).toFixed(2);
+        const raw = name + "_" + scoreStr + "_" + SECRET_SALT;
+        
+        let hash = 0;
+        for (let i = 0; i < raw.length; i++) {
+            const char = raw.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash; // Convert to 32bit integer
+        }
+        return hash.toString(16);
+    }
+
+    // === 讀取資料 ===
+    function loadData() {
+        const tbody = document.getElementById('tableBody');
+        const loading = document.getElementById('loading');
+        
+        tbody.innerHTML = '';
+        loading.style.display = 'block';
+
+        // 加上時間戳記避開快取
+        const bustedUrl = PROXY_BASE + encodeURIComponent(TARGET_URL + `?_t=${Date.now()}`);
+
+        fetch(bustedUrl)
+            .then(res => {
+                if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+                return res.json();
+            })
+            .then(data => {
+                loading.style.display = 'none';
+                processData(data);
+            })
+            .catch(err => {
+                loading.style.display = 'none';
+                tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color: #ef5350; padding: 30px;">讀取失敗: ${err.message}<br>可能是 Proxy 忙碌中，請稍後再試。</td></tr>`;
+                console.error(err);
+            });
+    }
+
+    // === 處理與渲染資料 ===
+    function processData(data) {
+        // 更新統計數據
+        document.getElementById('globalCount').innerText = data.global_play_count || 0;
+        
+        // 取得分數陣列
+        let scores = data.scores || [];
+        
+        // 排序：分數高到低
+        scores.sort((a, b) => b.score - a.score);
+        
+        // 存入全域變數
+        currentData = scores;
+        document.getElementById('recordCount').innerText = scores.length;
+
+        const tbody = document.getElementById('tableBody');
+
+        if (scores.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 30px;">資料庫目前是一片荒原。</td></tr>`;
+            return;
+        }
+
+        scores.forEach((entry, index) => {
+            // 進行驗證
+            const expectedSig = generateSignature(entry.name, entry.score);
+            // 檢查簽章是否存在且相符
+            const isValid = entry.signature && entry.signature === expectedSig;
+            
+            // 轉換日期
+            const dateObj = new Date(entry.date);
+            const dateStr = entry.date ? 
+                `${dateObj.getFullYear()}/${(dateObj.getMonth()+1).toString().padStart(2,'0')}/${dateObj.getDate().toString().padStart(2,'0')} ${dateObj.getHours().toString().padStart(2,'0')}:${dateObj.getMinutes().toString().padStart(2,'0')}` 
+                : 'Unknown';
+
+            const tr = document.createElement('tr');
+            if (!isValid) tr.className = 'row-invalid';
+
+            tr.innerHTML = `
+                <td><span style="color: #8da399; font-weight:bold;">#${index + 1}</span></td>
+                <td>
+                    <span class="status-dot ${isValid ? 'valid' : 'invalid'}"></span>
+                    ${isValid ? 'Verified' : 'Invalid'}
+                </td>
+                <td style="font-weight:bold; color: #fff;">${sanitize(entry.name)}</td>
+                <td style="font-family: 'JetBrains Mono'; font-size: 15px;">${parseFloat(entry.score).toFixed(4)} s</td>
+                <td style="color: #888;">${dateStr}</td>
+                <td style="font-family: monospace; font-size: 11px; color: #444;">
+                    ${entry.signature ? entry.signature.substring(0, 8) + '...' : 'N/A'}
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    // === XSS 防護 (雖然只有你自己看，但這是好習慣) ===
+    function sanitize(str) {
+        if (!str) return '';
+        const div = document.createElement('div');
+        div.innerText = str;
+        return div.innerHTML;
+    }
+
+    // === 匯出 CSV ===
+    function exportCSV() {
+        if (!currentData || currentData.length === 0) {
+            alert("沒有資料可以匯出");
+            return;
+        }
+
+        let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; // 加入 BOM 讓 Excel 正常讀取中文
+        csvContent += "Rank,Name,Score,Date,Signature,Valid\n";
+
+        currentData.forEach((entry, index) => {
+            const dateStr = entry.date ? new Date(entry.date).toISOString() : '';
+            const expectedSig = generateSignature(entry.name, entry.score);
+            const isValid = entry.signature === expectedSig;
+            
+            const row = [
+                index + 1,
+                `"${entry.name.replace(/"/g, '""')}"`, // 處理名字裡的逗號和引號
+                entry.score,
+                dateStr,
+                entry.signature || 'N/A',
+                isValid ? 'TRUE' : 'FALSE'
+            ];
+            csvContent += row.join(",") + "\n";
+        });
+
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `the_flow_rank_${new Date().toISOString().slice(0,10)}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+
+    // 初始化自動讀取
+    loadData();
+
+</script>
+
+</body>
+</html>
